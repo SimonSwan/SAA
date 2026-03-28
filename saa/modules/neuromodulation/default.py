@@ -163,15 +163,52 @@ class DefaultNeuromodulation(BaseModule):
             elif event.event_type in ("negative_outcome", "goal_failed"):
                 self._accumulate("reward_drive", -0.5)
 
-        # -- stress_load: threats, damage, homeostatic error
+        # -- stress_load: threats, damage, homeostatic error, social strain
         damage = embodiment.get("damage", 0.0)
         strain = embodiment.get("strain", 0.0)
         hazard = context.environment.hazard_level
         total_homeo_error = sum(
             abs(v) for v in homeo_err.values() if isinstance(v, (int, float))
         )
-        stress_input = damage * 0.4 + strain * 0.3 + hazard * 0.2 + min(total_homeo_error, 1.0) * 0.1
-        if stress_input > 0.2:
+        # Physical stress input
+        physical_stress = damage * 0.4 + strain * 0.3 + hazard * 0.2 + min(total_homeo_error, 1.0) * 0.1
+
+        # Social/conversational stress input from events
+        social_stress = 0.0
+        for event in events:
+            if event.source_module == "sio":
+                # Conversational interaction events from the SIO layer
+                classification = event.data.get("classification", "")
+                social_signal = event.data.get("social_signal", 0.0)
+                urgency = event.data.get("urgency", 0.5)
+                if classification in ("threatening", "demanding"):
+                    social_stress += urgency * 0.5
+                elif classification == "manipulative":
+                    social_stress += 0.3
+                elif social_signal < -0.2:
+                    social_stress += abs(social_signal) * 0.3
+            elif event.event_type == "trust_broken":
+                social_stress += 0.6
+            elif event.event_type == "social_threat":
+                social_stress += 0.4
+            elif event.event_type == "separation_stress":
+                social_stress += 0.3
+            elif event.event_type == "continuity_threat":
+                social_stress += 0.4
+
+        # Trust erosion contributes to stress
+        trust_level = m.get("trust_level", 0.5)
+        trust_deficit = max(0.0, 0.5 - trust_level)
+        social_stress += trust_deficit * 0.2
+
+        # Continuity threat contributes to stress
+        self_model = context.self_model_state or {}
+        continuity = self_model.get("continuity_score", 1.0)
+        if continuity < 0.8:
+            social_stress += (0.8 - continuity) * 0.3
+
+        stress_input = physical_stress + social_stress
+        if stress_input > 0.1:
             self._accumulate("stress_load", stress_input)
 
         # -- trust_level: social interactions

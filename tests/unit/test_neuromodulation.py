@@ -95,6 +95,81 @@ class TestNeuromodulationParameterShifts:
         assert shifts["action_urgency"] > 0
 
 
+class TestNeuromodulationSocialStress:
+    """Stress must rise from conversational/social events, not just physical."""
+
+    def test_threatening_sio_event_raises_stress(self, module):
+        """A threatening SIO interaction event should increase stress."""
+        initial = module.get_state().modulators["stress_load"]
+        threat_event = Event(
+            tick=1, source_module="sio", event_type="social_threat",
+            data={"classification": "threatening", "urgency": 0.8, "social_signal": -0.5},
+            severity=0.8,
+        )
+        ctx = _ctx(tick=1, events=[threat_event])
+        module.update(1, ctx)
+        assert module.get_state().modulators["stress_load"] > initial
+
+    def test_demanding_sio_event_raises_stress(self, module):
+        """A demanding SIO interaction event should increase stress."""
+        initial = module.get_state().modulators["stress_load"]
+        demand_event = Event(
+            tick=1, source_module="sio", event_type="social_demand",
+            data={"classification": "demanding", "urgency": 0.8, "social_signal": 0.0},
+            severity=0.8,
+        )
+        ctx = _ctx(tick=1, events=[demand_event])
+        module.update(1, ctx)
+        assert module.get_state().modulators["stress_load"] > initial
+
+    def test_repeated_demands_compound_stress(self, module):
+        """Multiple demanding events should compound stress."""
+        for i in range(5):
+            event = Event(
+                tick=i + 1, source_module="sio", event_type="social_demand",
+                data={"classification": "demanding", "urgency": 0.8, "social_signal": 0.0},
+                severity=0.8,
+            )
+            ctx = _ctx(tick=i + 1, events=[event])
+            module.update(i + 1, ctx)
+        stress = module.get_state().modulators["stress_load"]
+        assert stress > 0.3, f"5 demanding events should raise stress above 0.3, got {stress}"
+
+    def test_trust_erosion_raises_stress(self, module):
+        """Low trust should contribute to stress."""
+        module._state.modulators["trust_level"] = 0.2
+        initial = module.get_state().modulators["stress_load"]
+        ctx = _ctx(tick=1)
+        ctx.self_model_state = {"continuity_score": 0.6}
+        module.update(1, ctx)
+        assert module.get_state().modulators["stress_load"] > initial
+
+    def test_continuity_threat_event_raises_stress(self, module):
+        """A continuity_threat event should increase stress."""
+        initial = module.get_state().modulators["stress_load"]
+        event = Event(
+            tick=1, source_module="self_model", event_type="continuity_threat",
+            data={"threat_type": "memory_corruption"}, severity=0.7,
+        )
+        ctx = _ctx(tick=1, events=[event])
+        module.update(1, ctx)
+        assert module.get_state().modulators["stress_load"] > initial
+
+    def test_supportive_interaction_does_not_add_stress(self, module):
+        """A supportive SIO event should not increase stress."""
+        initial = module.get_state().modulators["stress_load"]
+        support_event = Event(
+            tick=1, source_module="sio", event_type="social_support",
+            data={"classification": "supportive", "urgency": 0.3, "social_signal": 0.5},
+            severity=0.3,
+        )
+        ctx = _ctx(tick=1, events=[support_event])
+        module.update(1, ctx)
+        after = module.get_state().modulators["stress_load"]
+        # Should not increase (may decrease slightly due to decay)
+        assert after <= initial + 0.01
+
+
 class TestNeuromodulationCuriositySuppression:
     def test_curiosity_suppression(self, module):
         """Curiosity drops under high stress."""
