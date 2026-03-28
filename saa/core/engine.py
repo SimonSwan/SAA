@@ -70,6 +70,9 @@ class SimulationEngine:
             environment=self._environment,
         )
 
+        # Seed with events published between ticks (e.g., SIO interactions)
+        context.events = self.event_bus.get_history(since_tick=self._tick)
+
         # Module-to-context-field mapping
         context_fields = {
             "embodiment": "embodiment_state",
