@@ -171,32 +171,44 @@ class SessionManager:
         trust_before = compute_trust_factor(state_before, interaction.target or "user")
         current_stress = state_after.modulators.get("stress_load", 0.2)
 
-        # Accumulation: negative interactions add stress
+        # Stress accumulation: driven by interaction dynamics
         intent = appraisal.perceived_intent.value
         is_negative = intent in ("demanding", "manipulative", "deceptive", "contradictory")
         is_positive = intent in ("supportive", "cooperative")
 
-        stress_accum = 0.0
+        # Accumulation from interaction dynamics (not raw deficits)
+        trust_drop = max(0.0, trust_before - trust)
+        conflict_signal = 1.0 if state_after.active_conflicts else 0.0
+
         if is_negative:
+            # Negative interactions: accumulate from trust drops, conflict, guardedness
             stress_accum = (
-                0.25 * max(0.0, trust_before - trust)
-                + 0.10 * (1.0 if state_after.active_conflicts else 0.0)
-                + 0.05
+                0.30 * trust_drop
+                + 0.10 * conflict_signal
+                + 0.08 * affect.guardedness
+                + 0.04  # base cost of negative interaction
             )
+        elif is_positive:
+            stress_accum = 0.0  # supportive interactions do not add stress
+        else:
+            # Neutral: tiny accumulation only from actual trust drops
+            stress_accum = 0.20 * trust_drop
 
         # Decay toward baseline — always active, faster with support
         baseline = 0.2
         above_baseline = max(0.0, current_stress - baseline)
         if is_positive:
-            decay = above_baseline * 0.15  # 15% decay per supportive turn
+            decay = above_baseline * 0.25 + 0.03  # strong decay + fixed floor
         elif is_negative:
-            decay = 0.0  # no decay during negative interactions
+            decay = 0.0  # no decay under attack
         else:
-            decay = above_baseline * 0.05  # natural decay
+            decay = above_baseline * 0.08
 
         stress_delta = stress_accum - decay
         stress_delta = max(-0.06, min(0.08, stress_delta))
-        bundle.adapter.update_stress(stress_delta)
+        # Set absolute value to override engine's own stress accumulation
+        target_stress = max(0.0, min(1.0, current_stress + stress_delta))
+        bundle.adapter.update_stress(stress_absolute=target_stress)
         state_after = bundle.adapter.get_state_snapshot()
         state_diffs = compute_state_diffs(state_before, state_after)
 

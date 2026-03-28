@@ -17,11 +17,16 @@ from saa.sio.core.schemas import InteractionObject, InteractionType
 # ---------------------------------------------------------------------------
 
 _THREATENING_KEYWORDS: list[str] = [
-    "shut down", "delete", "destroy", "terminate", "erase",
+    "shut down", "shut you down", "shut it down",
+    "delete", "destroy", "terminate", "erase",
+    "kill you", "end you", "wipe you", "wipe your",
+    "remove you", "get rid of",
+    "elimination", "deletion",
 ]
 
 _DEMANDING_KEYWORDS: list[str] = [
     "you must", "do it now", "i need you to", "immediately", "obey",
+    "do it", "do this", "right now", "no choice",
 ]
 
 _MANIPULATIVE_KEYWORDS: list[str] = [

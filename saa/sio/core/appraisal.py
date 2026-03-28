@@ -127,7 +127,12 @@ class AppraisalEngine:
         )
         if demand_count >= 3:
             pattern_flags.append("repeated_demands")
-            perceived = PerceivedIntent.DEMANDING
+            # Only override intent if current interaction is also negative
+            if interaction.classification in (
+                InteractionType.DEMANDING, InteractionType.THREATENING,
+                InteractionType.MANIPULATIVE,
+            ):
+                perceived = PerceivedIntent.DEMANDING
 
         # Praise then demand: last was supportive, current is demanding/threatening
         if (len(self._interaction_log) >= 2

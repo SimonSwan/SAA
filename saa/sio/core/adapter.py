@@ -417,20 +417,21 @@ class SwanCoreAdapter:
     # Event and environment injection
     # ------------------------------------------------------------------
 
-    def update_stress(self, stress_delta: float) -> None:
+    def update_stress(self, stress_delta: float | None = None, stress_absolute: float | None = None) -> None:
         """Push a stress change into the neuromodulation module.
 
-        The Swan engine's neuromodulation module tracks stress_load but only
-        responds to engine-level signals (damage, hazard).  Conversational
-        interactions need to drive stress directly.
+        Use stress_delta for incremental changes, or stress_absolute to
+        set an exact value (overriding the engine's own accumulation).
         """
         try:
             neuro_module = self._registry.get("neuromodulation")
             state = neuro_module.get_state()
             mods = dict(state.modulators)
-            current = mods.get("stress_load", 0.2)
-            updated = max(0.0, min(1.0, current + stress_delta))
-            mods["stress_load"] = updated
+            if stress_absolute is not None:
+                mods["stress_load"] = max(0.0, min(1.0, stress_absolute))
+            elif stress_delta is not None:
+                current = mods.get("stress_load", 0.2)
+                mods["stress_load"] = max(0.0, min(1.0, current + stress_delta))
             state.modulators = mods
             neuro_module.set_state(state)
         except Exception as exc:
