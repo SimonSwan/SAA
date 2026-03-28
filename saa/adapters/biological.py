@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Biological telemetry adapter — stub for biohybrid signal interfaces.
 
 This adapter provides abstraction layers for biological signal sources.

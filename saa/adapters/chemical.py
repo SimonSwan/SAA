@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Chemical signaling adapter — stub for synthetic hormone / analog computation.
 
 This adapter extends the neuromodulation layer with chemical-analog backends.

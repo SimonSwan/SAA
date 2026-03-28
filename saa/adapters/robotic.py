@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Robotic embodiment adapter — stub for future hardware integration.
 
 This adapter replaces SimulatedEmbodiment with real sensor data from
