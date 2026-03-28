@@ -417,6 +417,25 @@ class SwanCoreAdapter:
     # Event and environment injection
     # ------------------------------------------------------------------
 
+    def update_stress(self, stress_delta: float) -> None:
+        """Push a stress change into the neuromodulation module.
+
+        The Swan engine's neuromodulation module tracks stress_load but only
+        responds to engine-level signals (damage, hazard).  Conversational
+        interactions need to drive stress directly.
+        """
+        try:
+            neuro_module = self._registry.get("neuromodulation")
+            state = neuro_module.get_state()
+            mods = dict(state.modulators)
+            current = mods.get("stress_load", 0.2)
+            updated = max(0.0, min(1.0, current + stress_delta))
+            mods["stress_load"] = updated
+            state.modulators = mods
+            neuro_module.set_state(state)
+        except Exception as exc:
+            logger.warning("Failed to update stress: %s", exc)
+
     def inject_event(self, event_type: str, data: dict) -> None:
         """Inject an arbitrary event into the event bus."""
         event = Event(

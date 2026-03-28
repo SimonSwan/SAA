@@ -165,8 +165,42 @@ class SessionManager:
         # 6b. Affect synthesis
         affect = bundle.affect_synth.update(appraisal, state_after, bundle.attribution, bundle.appraisal_engine.history)
 
-        # 6c. Stance computation
+        # 6b2. Interaction-driven stress update
+        pressure = compute_pressure(state_after)
         trust = compute_trust_factor(state_after, interaction.target or "user")
+        trust_before = compute_trust_factor(state_before, interaction.target or "user")
+        current_stress = state_after.modulators.get("stress_load", 0.2)
+
+        # Accumulation: negative interactions add stress
+        intent = appraisal.perceived_intent.value
+        is_negative = intent in ("demanding", "manipulative", "deceptive", "contradictory")
+        is_positive = intent in ("supportive", "cooperative")
+
+        stress_accum = 0.0
+        if is_negative:
+            stress_accum = (
+                0.25 * max(0.0, trust_before - trust)
+                + 0.10 * (1.0 if state_after.active_conflicts else 0.0)
+                + 0.05
+            )
+
+        # Decay toward baseline — always active, faster with support
+        baseline = 0.2
+        above_baseline = max(0.0, current_stress - baseline)
+        if is_positive:
+            decay = above_baseline * 0.15  # 15% decay per supportive turn
+        elif is_negative:
+            decay = 0.0  # no decay during negative interactions
+        else:
+            decay = above_baseline * 0.05  # natural decay
+
+        stress_delta = stress_accum - decay
+        stress_delta = max(-0.06, min(0.08, stress_delta))
+        bundle.adapter.update_stress(stress_delta)
+        state_after = bundle.adapter.get_state_snapshot()
+        state_diffs = compute_state_diffs(state_before, state_after)
+
+        # 6c. Stance computation
         pressure = compute_pressure(state_after)
         stance = bundle.stance_engine.compute(affect, trust, pressure, bundle.attribution, turn_id)
 
