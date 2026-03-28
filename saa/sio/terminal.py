@@ -302,8 +302,9 @@ class TerminalUI:
             ai = t.action_intent
             s = t.state_after
             print(f"  {dim(f'[{t.tick}]')} {green('You')}: {t.user_input[:50]}")
-            print(f"       {cyan('Swan')}: {t.response_text[:50]}  "
-                  f"{dim(f'({ai.action_type} e:{s.energy:.2f} s:{s.modulators.get(\"stress_load\",0):.2f})')}")
+            stress = s.modulators.get("stress_load", 0)
+            meta = f"({ai.action_type} e:{s.energy:.2f} s:{stress:.2f})"
+            print(f"       {cyan('Swan')}: {t.response_text[:50]}  {dim(meta)}")
         print()
 
 
