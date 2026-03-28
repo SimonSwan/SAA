@@ -97,7 +97,7 @@ async def get_state(session_id: str) -> dict[str, Any]:
     conflicts: list[dict] = []
     modulators: dict[str, float] = {}
     if bundle:
-        adapter = bundle[1]
+        adapter = bundle.adapter
         memory_summary = adapter.get_memory_snapshot()
         relationships = adapter.get_relationship_graph()
         conflicts = adapter.get_active_conflicts()
@@ -151,8 +151,7 @@ async def get_rationale(session_id: str) -> dict[str, Any]:
     bundle = session_manager._sessions.get(session_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    adapter = bundle[1]
-    return adapter.get_rationale_trace()
+    return bundle.adapter.get_rationale_trace()
 
 
 @router.get("/relationships/{session_id}")
@@ -160,7 +159,7 @@ async def get_relationships(session_id: str) -> dict[str, Any]:
     bundle = session_manager._sessions.get(session_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return bundle[1].get_relationship_graph()
+    return bundle.adapter.get_relationship_graph()
 
 
 @router.get("/memory/{session_id}")
@@ -168,7 +167,7 @@ async def get_memory(session_id: str) -> dict[str, Any]:
     bundle = session_manager._sessions.get(session_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return bundle[1].get_memory_snapshot()
+    return bundle.adapter.get_memory_snapshot()
 
 
 @router.get("/modulators/{session_id}")
@@ -176,7 +175,7 @@ async def get_modulators(session_id: str) -> dict[str, float]:
     bundle = session_manager._sessions.get(session_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return bundle[1].get_modulation_state()
+    return bundle.adapter.get_modulation_state()
 
 
 @router.get("/conflicts/{session_id}")
@@ -184,4 +183,19 @@ async def get_conflicts(session_id: str) -> list[dict[str, Any]]:
     bundle = session_manager._sessions.get(session_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return bundle[1].get_active_conflicts()
+    return bundle.adapter.get_active_conflicts()
+
+
+@router.get("/appraisal/{session_id}")
+async def get_appraisal(session_id: str) -> list[dict[str, Any]]:
+    return session_manager.get_appraisal_history(session_id)
+
+
+@router.get("/affect/{session_id}")
+async def get_affect(session_id: str) -> dict[str, Any]:
+    return session_manager.get_affect(session_id)
+
+
+@router.get("/stance/{session_id}")
+async def get_stance(session_id: str) -> dict[str, Any]:
+    return session_manager.get_stance(session_id)

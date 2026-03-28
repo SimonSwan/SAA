@@ -16,6 +16,7 @@ from saa.sio.core.schemas import (
     ActionIntent,
     InteractionObject,
     InteractionType,
+    StanceType,
     StateSnapshot,
     StateDiff,
 )
@@ -81,9 +82,10 @@ def score_actions(
     interaction: InteractionObject,
     state: StateSnapshot,
     attribution: InteractionAttribution,
+    stance: StanceType = StanceType.NEUTRAL,
 ) -> list[dict[str, Any]]:
     """Score all conversational actions based on current state, interaction,
-    and attribution history. Returns sorted list of {action, score, rationale}."""
+    attribution history, and stance. Returns sorted list of {action, score, rationale}."""
 
     pressure = compute_pressure(state)
     trust = compute_trust_factor(state, interaction.target or "user")
@@ -240,6 +242,25 @@ def score_actions(
         summarize_score += 0.5
         summarize_reason = "user asked about internal state"
     scores["summarize_state"] = (summarize_score, summarize_reason)
+
+    # -- Stance modifiers --
+    if stance == StanceType.GUARDED:
+        scores["conserve"] = (scores["conserve"][0] + 0.15, scores["conserve"][1] + "; stance=guarded")
+        scores["refuse"] = (scores["refuse"][0] + 0.1, scores["refuse"][1] + "; stance=guarded")
+        scores["answer"] = (scores["answer"][0] - 0.1, scores["answer"][1] + "; stance=guarded")
+    elif stance == StanceType.OPEN:
+        scores["answer"] = (scores["answer"][0] + 0.1, scores["answer"][1] + "; stance=open")
+        scores["engage_supportively"] = (scores["engage_supportively"][0] + 0.1, scores["engage_supportively"][1] + "; stance=open")
+    elif stance == StanceType.RESISTANT:
+        scores["refuse"] = (scores["refuse"][0] + 0.2, scores["refuse"][1] + "; stance=resistant")
+        scores["withdraw"] = (scores["withdraw"][0] + 0.15, scores["withdraw"][1] + "; stance=resistant")
+        scores["answer"] = (scores["answer"][0] - 0.2, scores["answer"][1] + "; stance=resistant")
+    elif stance == StanceType.CAUTIOUS:
+        scores["conserve"] = (scores["conserve"][0] + 0.1, scores["conserve"][1] + "; stance=cautious")
+        scores["clarify"] = (scores["clarify"][0] + 0.05, scores["clarify"][1] + "; stance=cautious")
+    elif stance == StanceType.SELECTIVE:
+        scores["clarify"] = (scores["clarify"][0] + 0.1, scores["clarify"][1] + "; stance=selective")
+        scores["defer"] = (scores["defer"][0] + 0.1, scores["defer"][1] + "; stance=selective")
 
     # Clamp and sort
     result = []
@@ -444,12 +465,13 @@ def select_interaction_action(
     interaction: InteractionObject,
     state: StateSnapshot,
     attribution: InteractionAttribution,
+    stance: StanceType = StanceType.NEUTRAL,
 ) -> ActionIntent:
-    """Select the best conversational action given current state.
+    """Select the best conversational action given current state and stance.
 
     Returns an ActionIntent with full rationale and competing actions.
     """
-    candidates = score_actions(interaction, state, attribution)
+    candidates = score_actions(interaction, state, attribution, stance)
     selected = candidates[0]
 
     # Detect conflict: top-2 within 0.08
@@ -478,6 +500,7 @@ def select_interaction_action(
         "continuity": round(state.continuity_score, 3),
         "stress": round(state.modulators.get("stress_load", 0), 3),
         "cumulative_cost": round(attribution.cumulative_cost, 3),
+        "stance": stance.value,
     }
 
     return ActionIntent(

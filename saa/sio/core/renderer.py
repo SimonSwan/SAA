@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from saa.sio.core.schemas import ActionIntent, InteractionObject, StateSnapshot, StateDiff
+from saa.sio.core.schemas import (
+    ActionIntent, AffectState, InteractionObject, StanceType, StateSnapshot,
+    StateDiff, TrendProjection,
+)
 from saa.sio.core.policy import (
     InteractionAttribution,
     compute_pressure,
@@ -38,6 +41,10 @@ class LanguageRenderer:
         diffs: list[StateDiff] | None = None,
         attribution: InteractionAttribution | None = None,
         first_state: StateSnapshot | None = None,
+        affect: AffectState | None = None,
+        stance: StanceType | None = None,
+        narrative: str | None = None,
+        projection: TrendProjection | None = None,
     ) -> str:
         """Produce a human-readable response grounded in actual state."""
 
@@ -54,8 +61,19 @@ class LanguageRenderer:
         elif pressure > 0.35:
             parts.append("Operating under elevated strain.")
 
+        # Stance-driven prefix
+        if stance is not None:
+            if stance == StanceType.RESISTANT:
+                parts.append("I am setting boundaries on this interaction.")
+            elif stance == StanceType.CAUTIOUS:
+                parts.append("Proceeding with caution.")
+            elif stance == StanceType.SELECTIVE:
+                parts.append("I'm being selective about engagement.")
+            # GUARDED: no prefix, but suppresses warm language (handled in _render_action)
+            # OPEN / NEUTRAL: no prefix
+
         # Action-specific core response
-        core = self._render_action(action, state, interaction, attribution)
+        core = self._render_action(action, state, interaction, attribution, stance=stance)
         parts.append(core)
 
         # State-driven qualifiers (only when state warrants them)
@@ -71,6 +89,20 @@ class LanguageRenderer:
             )
             if state_answer:
                 parts.append(state_answer)
+
+        # Narrative answers "why" queries
+        if narrative and self._is_why_query(interaction.text):
+            parts.append(narrative)
+
+        # Trend projection answers "what will happen" queries
+        if projection and self._is_projection_query(interaction.text):
+            parts.append(
+                f"Projected over {projection.horizon_turns} turns: "
+                f"{projection.trajectory_description}. "
+                f"Energy\u2192{projection.energy_projected:.2f}, "
+                f"Continuity\u2192{projection.continuity_projected:.2f}, "
+                f"Stress\u2192{projection.stress_projected:.2f}."
+            )
 
         return " ".join(parts)
 
@@ -104,12 +136,15 @@ class LanguageRenderer:
         state: StateSnapshot,
         interaction: InteractionObject,
         attribution: InteractionAttribution | None,
+        stance: StanceType | None = None,
     ) -> str:
         energy = state.energy
         continuity = state.continuity_score
         stress = state.modulators.get("stress_load", 0.0)
 
         if action == "answer":
+            if stance == StanceType.RESISTANT:
+                return "I can respond briefly, within current boundaries."
             if energy > 0.6:
                 return "I can address that."
             elif energy > 0.3:
@@ -121,6 +156,8 @@ class LanguageRenderer:
             return "I need to understand this better before responding. Can you be more specific about what you need?"
 
         elif action == "engage_supportively":
+            if stance == StanceType.GUARDED:
+                return "Acknowledged."
             if stress > 0.4:
                 return "I appreciate the support. It does make a difference to my stability."
             else:
@@ -217,6 +254,26 @@ class LanguageRenderer:
             "am i helping", "am i harming", "help or harm",
             "what's different", "current condition",
             "how are things", "how is your",
+            "why are you", "why did you", "why have you", "explain your",
+            "what's driving", "why cautious", "why guarded", "why refusing",
+        ]
+        return any(t in text_lower for t in triggers)
+
+    @staticmethod
+    def _is_why_query(text: str) -> bool:
+        text_lower = text.lower()
+        triggers = [
+            "why are you", "why did you", "why have you", "explain your",
+            "what's driving", "why cautious", "why guarded", "why refusing",
+        ]
+        return any(t in text_lower for t in triggers)
+
+    @staticmethod
+    def _is_projection_query(text: str) -> bool:
+        text_lower = text.lower()
+        triggers = [
+            "what will happen", "what's going to happen", "if this continues",
+            "predict", "projection", "future",
         ]
         return any(t in text_lower for t in triggers)
 

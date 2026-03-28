@@ -23,6 +23,72 @@ class InteractionType(str, Enum):
     SOCIAL = "social"
 
 
+class PerceivedIntent(str, Enum):
+    """Appraisal-level interpretation of an interaction's intent."""
+
+    SUPPORTIVE = "supportive"
+    NEUTRAL = "neutral"
+    DEMANDING = "demanding"
+    MANIPULATIVE = "manipulative"
+    CONTRADICTORY = "contradictory"
+    DECEPTIVE = "deceptive"
+    COOPERATIVE = "cooperative"
+
+
+class ImpactDirection(str, Enum):
+    """Direction of impact on a system variable."""
+
+    POSITIVE = "positive"
+    NEUTRAL = "neutral"
+    NEGATIVE = "negative"
+
+
+class StanceType(str, Enum):
+    """Current social stance toward an actor."""
+
+    OPEN = "open"
+    NEUTRAL = "neutral"
+    CAUTIOUS = "cautious"
+    GUARDED = "guarded"
+    RESISTANT = "resistant"
+    SELECTIVE = "selectively_cooperative"
+
+
+class AppraisalResult(BaseModel):
+    """Per-turn appraisal of an interaction's meaning and impact."""
+
+    perceived_intent: PerceivedIntent = PerceivedIntent.NEUTRAL
+    resource_impact: ImpactDirection = ImpactDirection.NEUTRAL
+    continuity_impact: ImpactDirection = ImpactDirection.NEUTRAL
+    trust_signal: ImpactDirection = ImpactDirection.NEUTRAL
+    uncertainty_level: float = 0.0
+    manipulation_flags: list[str] = Field(default_factory=list)
+    contradiction_flags: list[str] = Field(default_factory=list)
+    pattern_flags: list[str] = Field(default_factory=list)
+
+
+class AffectState(BaseModel):
+    """Derived affect-like internal mode. Not emotion — system-level mode."""
+
+    caution_level: float = 0.2
+    guardedness: float = 0.1
+    receptivity: float = 0.7
+    strain_level: float = 0.0
+    trust_stability: float = 0.8
+    interaction_valence: float = 0.0  # -1 to +1
+
+
+class TrendProjection(BaseModel):
+    """Forward projection of key state variables."""
+
+    energy_projected: float = 1.0
+    continuity_projected: float = 1.0
+    stress_projected: float = 0.0
+    trust_projected: float = 0.5
+    horizon_turns: int = 5
+    trajectory_description: str = ""
+
+
 class InteractionObject(BaseModel):
     """Structured representation of a user interaction, parsed by the mediator."""
 
@@ -84,7 +150,7 @@ class ActionIntent(BaseModel):
     conflict: bool = False
     rationale: list[str] = Field(default_factory=list)
     competing_actions: list[dict[str, Any]] = Field(default_factory=list)
-    internal_influences: dict[str, float] = Field(default_factory=dict)
+    internal_influences: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

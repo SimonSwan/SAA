@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from saa.sio.core.schemas import (
     InteractionObject,
     ActionIntent,
     StateDiff,
+    StanceType,
 )
 from saa.sio.core.adapter import SwanCoreAdapter
 from saa.sio.core.mediator import ConversationalMediator
@@ -28,14 +30,28 @@ from saa.sio.core.policy import (
     InteractionAttribution,
     compute_state_diffs,
     select_interaction_action,
+    compute_trust_factor,
+    compute_pressure,
+)
+from saa.sio.core.appraisal import (
+    AppraisalEngine, AffectSynthesizer, StanceEngine,
+    NarrativeSynthesizer, TrendProjector,
 )
 
 
-# Type alias for the per-session bundle stored in memory.
-_SessionBundle = tuple[
-    SessionState, SwanCoreAdapter, ConversationalMediator,
-    LanguageRenderer, InteractionAttribution, StateSnapshot | None,
-]
+@dataclass
+class _SessionComponents:
+    state: SessionState
+    adapter: SwanCoreAdapter
+    mediator: ConversationalMediator
+    renderer: LanguageRenderer
+    attribution: InteractionAttribution
+    first_state: StateSnapshot | None
+    appraisal_engine: AppraisalEngine
+    affect_synth: AffectSynthesizer
+    stance_engine: StanceEngine
+    narrative_synth: NarrativeSynthesizer
+    trend_projector: TrendProjector
 
 
 class SessionManager:
@@ -51,7 +67,7 @@ class SessionManager:
 
     def __init__(self, storage_dir: str = "sessions") -> None:
         self._storage_dir = Path(storage_dir)
-        self._sessions: dict[str, _SessionBundle] = {}
+        self._sessions: dict[str, _SessionComponents] = {}
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -80,12 +96,30 @@ class SessionManager:
         )
 
         first_state = adapter.get_state_snapshot()
-        self._sessions[session_id] = (state, adapter, mediator, renderer, attribution, first_state)
+        appraisal_engine = AppraisalEngine()
+        affect_synth = AffectSynthesizer()
+        stance_engine = StanceEngine()
+        narrative_synth = NarrativeSynthesizer()
+        trend_projector = TrendProjector()
+
+        self._sessions[session_id] = _SessionComponents(
+            state=state,
+            adapter=adapter,
+            mediator=mediator,
+            renderer=renderer,
+            attribution=attribution,
+            first_state=first_state,
+            appraisal_engine=appraisal_engine,
+            affect_synth=affect_synth,
+            stance_engine=stance_engine,
+            narrative_synth=narrative_synth,
+            trend_projector=trend_projector,
+        )
         return session_id
 
     def get_session(self, session_id: str) -> SessionState | None:
         bundle = self._sessions.get(session_id)
-        return bundle[0] if bundle else None
+        return bundle.state if bundle else None
 
     # ------------------------------------------------------------------
     # Input processing — full pipeline
@@ -104,50 +138,77 @@ class SessionManager:
         8. Renderer produces state-grounded response
         9. Build and store TurnRecord
         """
-        session_state, adapter, mediator, renderer, attribution, first_state = (
-            self._get_bundle(session_id)
-        )
+        bundle = self._get_bundle(session_id)
 
         # 1. Parse
-        interaction = mediator.parse(text)
+        interaction = bundle.mediator.parse(text)
 
         # 2. Snapshot before
-        state_before = adapter.get_state_snapshot()
+        state_before = bundle.adapter.get_state_snapshot()
 
         # 3. Process through engine
-        context, _engine_action = adapter.process_interaction(interaction)
+        context, _engine_action = bundle.adapter.process_interaction(interaction)
 
         # 4. Snapshot after
-        state_after = adapter.get_state_snapshot()
+        state_after = bundle.adapter.get_state_snapshot()
 
         # 5. Compute diffs
         state_diffs = compute_state_diffs(state_before, state_after)
 
         # 6. Record attribution
-        attr_entry = attribution.record(interaction, state_before, state_after)
+        attr_entry = bundle.attribution.record(interaction, state_before, state_after)
+
+        # 6a. Appraisal
+        turn_id = len(bundle.state.turns)
+        appraisal = bundle.appraisal_engine.appraise(interaction, state_before, state_after, bundle.attribution)
+
+        # 6b. Affect synthesis
+        affect = bundle.affect_synth.update(appraisal, state_after, bundle.attribution, bundle.appraisal_engine.history)
+
+        # 6c. Stance computation
+        trust = compute_trust_factor(state_after, interaction.target or "user")
+        pressure = compute_pressure(state_after)
+        stance = bundle.stance_engine.compute(affect, trust, pressure, bundle.attribution, turn_id)
+
+        # 6d. Narrative
+        narrative = bundle.narrative_synth.synthesize(
+            bundle.appraisal_engine.history, affect, stance, bundle.attribution,
+            state_after, bundle.first_state, bundle.stance_engine.history,
+        )
+
+        # 6e. Trend projection
+        projection = bundle.trend_projector.project(bundle.state.turns, state_after)
 
         # 7. Policy selects conversational action
-        action_intent = select_interaction_action(interaction, state_after, attribution)
+        action_intent = select_interaction_action(interaction, state_after, bundle.attribution, stance)
 
         # 8. Render response
-        response_text = renderer.render(
+        response_text = bundle.renderer.render(
             action_intent=action_intent,
             state=state_after,
             interaction=interaction,
             diffs=state_diffs,
-            attribution=attribution,
-            first_state=first_state,
+            attribution=bundle.attribution,
+            first_state=bundle.first_state,
+            affect=affect,
+            stance=stance,
+            narrative=narrative,
+            projection=projection,
         )
 
         # 9. Build TurnRecord
-        turn_id = len(session_state.turns)
         tick = state_after.tick
 
-        memory_snapshot = adapter.get_memory_snapshot()
-        relationship_graph = adapter.get_relationship_graph()
-        rationale_trace = adapter.get_rationale_trace()
+        memory_snapshot = bundle.adapter.get_memory_snapshot()
+        relationship_graph = bundle.adapter.get_relationship_graph()
+        rationale_trace = bundle.adapter.get_rationale_trace()
         rationale_trace["attribution"] = attr_entry
         rationale_trace["pressure"] = action_intent.internal_influences.get("pressure", 0)
+        rationale_trace["appraisal"] = appraisal.model_dump()
+        rationale_trace["affect"] = affect.model_dump()
+        rationale_trace["stance"] = stance.value
+        rationale_trace["narrative"] = narrative
+        rationale_trace["projection"] = projection.model_dump()
 
         memory_updates: list[dict[str, Any]] = []
         if memory_snapshot.get("last_encoded_tick") == tick:
@@ -188,8 +249,8 @@ class SessionManager:
             rationale_trace=rationale_trace,
         )
 
-        session_state.turns.append(turn)
-        session_state.current_tick = tick
+        bundle.state.turns.append(turn)
+        bundle.state.current_tick = tick
 
         return turn
 
@@ -198,59 +259,59 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def inject_event(self, session_id: str, event_type: str, data: dict) -> StateSnapshot:
-        _state, adapter, _m, _r, _a, _f = self._get_bundle(session_id)
-        adapter.inject_event(event_type, data)
-        return adapter.get_state_snapshot()
+        bundle = self._get_bundle(session_id)
+        bundle.adapter.inject_event(event_type, data)
+        return bundle.adapter.get_state_snapshot()
 
     # ------------------------------------------------------------------
     # State queries
     # ------------------------------------------------------------------
 
     def get_state(self, session_id: str) -> StateSnapshot:
-        _state, adapter, _m, _r, _a, _f = self._get_bundle(session_id)
-        return adapter.get_state_snapshot()
+        bundle = self._get_bundle(session_id)
+        return bundle.adapter.get_state_snapshot()
 
     def get_history(self, session_id: str) -> list[TurnRecord]:
-        state, _a, _m, _r, _attr, _f = self._get_bundle(session_id)
-        return list(state.turns)
+        bundle = self._get_bundle(session_id)
+        return list(bundle.state.turns)
 
     def get_attribution(self, session_id: str) -> dict[str, Any]:
-        _state, _a, _m, _r, attribution, _f = self._get_bundle(session_id)
-        return attribution.get_summary()
+        bundle = self._get_bundle(session_id)
+        return bundle.attribution.get_summary()
 
     # ------------------------------------------------------------------
     # Checkpointing and replay
     # ------------------------------------------------------------------
 
     def create_checkpoint(self, session_id: str) -> int:
-        session_state, adapter, _m, _r, _a, _f = self._get_bundle(session_id)
-        tick = session_state.current_tick
-        session_state.checkpoints[tick] = adapter.get_full_state()
+        bundle = self._get_bundle(session_id)
+        tick = bundle.state.current_tick
+        bundle.state.checkpoints[tick] = bundle.adapter.get_full_state()
         return tick
 
     def replay_from(self, session_id: str, from_turn: int) -> str:
-        session_state, _a, _m, _r, _attr, _f = self._get_bundle(session_id)
+        bundle = self._get_bundle(session_id)
 
         checkpoint_state: dict[str, Any] | None = None
-        for tick in sorted(session_state.checkpoints.keys(), reverse=True):
+        for tick in sorted(bundle.state.checkpoints.keys(), reverse=True):
             if tick <= from_turn:
-                checkpoint_state = session_state.checkpoints[tick]
+                checkpoint_state = bundle.state.checkpoints[tick]
                 break
 
-        new_config = session_state.config.model_copy(deep=True)
+        new_config = bundle.state.config.model_copy(deep=True)
         new_config.session_id = ""
         new_session_id = self.create_session(new_config)
-        new_state, new_adapter, _nm, _nr, _na, _nf = self._get_bundle(new_session_id)
+        new_bundle = self._get_bundle(new_session_id)
 
         if checkpoint_state is not None:
-            new_adapter.set_full_state(checkpoint_state)
+            new_bundle.adapter.set_full_state(checkpoint_state)
 
-        new_state.turns = [t.model_copy(deep=True) for t in session_state.turns[:from_turn]]
-        new_state.current_tick = (
-            session_state.turns[from_turn - 1].tick
-            if from_turn > 0 and session_state.turns else 0
+        new_bundle.state.turns = [t.model_copy(deep=True) for t in bundle.state.turns[:from_turn]]
+        new_bundle.state.current_tick = (
+            bundle.state.turns[from_turn - 1].tick
+            if from_turn > 0 and bundle.state.turns else 0
         )
-        new_state.scenario_events.append({
+        new_bundle.state.scenario_events.append({
             "type": "branch",
             "source_session": session_id,
             "from_turn": from_turn,
@@ -263,7 +324,7 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def save_session(self, session_id: str) -> None:
-        session_state = self._get_bundle(session_id)[0]
+        session_state = self._get_bundle(session_id).state
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         path = self._storage_dir / f"{session_id}.json"
         path.write_text(json.dumps(session_state.model_dump(mode="json"), indent=2, default=str))
@@ -290,7 +351,19 @@ class SessionManager:
         attribution = InteractionAttribution()
         first_state = adapter.get_state_snapshot()
 
-        self._sessions[session_id] = (session_state, adapter, mediator, renderer, attribution, first_state)
+        self._sessions[session_id] = _SessionComponents(
+            state=session_state,
+            adapter=adapter,
+            mediator=mediator,
+            renderer=renderer,
+            attribution=attribution,
+            first_state=first_state,
+            appraisal_engine=AppraisalEngine(),
+            affect_synth=AffectSynthesizer(),
+            stance_engine=StanceEngine(),
+            narrative_synth=NarrativeSynthesizer(),
+            trend_projector=TrendProjector(),
+        )
         return session_state
 
     def list_sessions(self) -> list[str]:
@@ -301,10 +374,26 @@ class SessionManager:
         return sorted(session_ids)
 
     # ------------------------------------------------------------------
+    # Appraisal queries
+    # ------------------------------------------------------------------
+
+    def get_appraisal_history(self, session_id: str) -> list[dict[str, Any]]:
+        bundle = self._get_bundle(session_id)
+        return [a.model_dump() for a in bundle.appraisal_engine.history]
+
+    def get_affect(self, session_id: str) -> dict[str, Any]:
+        bundle = self._get_bundle(session_id)
+        return bundle.affect_synth.state.model_dump()
+
+    def get_stance(self, session_id: str) -> dict[str, Any]:
+        bundle = self._get_bundle(session_id)
+        return {"current": bundle.stance_engine.current.value, "history": bundle.stance_engine.history}
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _get_bundle(self, session_id: str) -> _SessionBundle:
+    def _get_bundle(self, session_id: str) -> _SessionComponents:
         bundle = self._sessions.get(session_id)
         if bundle is None:
             raise KeyError(f"Session '{session_id}' not found")

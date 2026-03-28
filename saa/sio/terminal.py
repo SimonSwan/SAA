@@ -20,6 +20,11 @@ COMMANDS = {
     "/rationale": "Show last action rationale",
     "/memory":    "Show memory summary",
     "/history":   "Show conversation history",
+    "/appraisal": "Show appraisal history",
+    "/affect":    "Show current affect state",
+    "/stance":    "Show current stance and history",
+    "/narrative": "Show narrative explanation",
+    "/project":   "Show trend projection",
     "/inject":    "Inject event: /inject <type> [key=val ...]",
     "/save":      "Save session checkpoint",
     "/mode":      "Toggle view mode: /mode human|analyst|engineer",
@@ -204,6 +209,21 @@ class TerminalUI:
                           f"cont:{snapshot.continuity_score:.3f}"))
             print()
 
+        elif command == "/appraisal":
+            self._show_appraisal()
+
+        elif command == "/affect":
+            self._show_affect()
+
+        elif command == "/stance":
+            self._show_stance()
+
+        elif command == "/narrative":
+            self._show_narrative()
+
+        elif command == "/project":
+            self._show_projection()
+
         else:
             print(f"  Unknown command: {command}. Type /help for options.")
             print()
@@ -240,7 +260,7 @@ class TerminalUI:
         bundle = self.mgr._sessions.get(self.session_id)
         if not bundle:
             return
-        rels = bundle[1].get_relationship_graph()
+        rels = bundle.adapter.get_relationship_graph()
         print()
         print(cyan("  ── Relationships ──"))
         if not rels:
@@ -269,7 +289,7 @@ class TerminalUI:
         bundle = self.mgr._sessions.get(self.session_id)
         if not bundle:
             return
-        rat = bundle[1].get_rationale_trace()
+        rat = bundle.adapter.get_rationale_trace()
         print()
         print(cyan("  ── Last Action Rationale ──"))
         print(f"  Selected: {rat.get('selected', '?')} (score: {rat.get('selected_score', 0):.3f})")
@@ -285,7 +305,7 @@ class TerminalUI:
         bundle = self.mgr._sessions.get(self.session_id)
         if not bundle:
             return
-        mem = bundle[1].get_memory_snapshot()
+        mem = bundle.adapter.get_memory_snapshot()
         print()
         print(cyan("  ── Memory ──"))
         print(f"  Episodic:    {mem.get('episodic_count', 0)}")
@@ -303,8 +323,110 @@ class TerminalUI:
             s = t.state_after
             print(f"  {dim(f'[{t.tick}]')} {green('You')}: {t.user_input[:50]}")
             stress = s.modulators.get("stress_load", 0)
-            meta = f"({ai.action_type} e:{s.energy:.2f} s:{stress:.2f})"
+            stance_val = ai.internal_influences.get("stance", "?")
+            meta = f"({ai.action_type} e:{s.energy:.2f} s:{stress:.2f} stance={stance_val})"
             print(f"       {cyan('Swan')}: {t.response_text[:50]}  {dim(meta)}")
+        print()
+
+    def _show_appraisal(self) -> None:
+        try:
+            history = self.mgr.get_appraisal_history(self.session_id)
+        except Exception:
+            print("  No appraisal data available.")
+            return
+        print()
+        print(cyan("  ── Appraisal History ──"))
+        for i, a in enumerate(history[-10:]):
+            flags = a.get("manipulation_flags", []) + a.get("pattern_flags", [])
+            flag_str = f" {red('FLAGS: ' + ', '.join(flags))}" if flags else ""
+            print(f"  [{i}] intent={a.get('perceived_intent','?')} "
+                  f"resource={a.get('resource_impact','?')} "
+                  f"trust={a.get('trust_signal','?')} "
+                  f"uncertainty={a.get('uncertainty_level',0):.2f}{flag_str}")
+        print()
+
+    def _show_affect(self) -> None:
+        try:
+            affect = self.mgr.get_affect(self.session_id)
+        except Exception:
+            print("  No affect data available.")
+            return
+        print()
+        print(cyan("  ── Affect State ──"))
+        print(f"  Caution:     {bar(affect.get('caution_level', 0), inverted=True)}")
+        print(f"  Guardedness: {bar(affect.get('guardedness', 0), inverted=True)}")
+        print(f"  Receptivity: {bar(affect.get('receptivity', 0))}")
+        print(f"  Strain:      {bar(affect.get('strain_level', 0), inverted=True)}")
+        print(f"  Trust Stab:  {bar(affect.get('trust_stability', 0))}")
+        valence = affect.get('interaction_valence', 0)
+        v_color = green if valence > 0.1 else red if valence < -0.1 else dim
+        print(f"  Valence:     {v_color(f'{valence:+.3f}')}")
+        print()
+
+    def _show_stance(self) -> None:
+        try:
+            stance_data = self.mgr.get_stance(self.session_id)
+        except Exception:
+            print("  No stance data available.")
+            return
+        print()
+        current = stance_data.get("current", "?")
+        print(cyan("  ── Social Stance ──"))
+        print(f"  Current: {yellow(current)}")
+        history = stance_data.get("history", [])
+        if history:
+            print("  Transitions:")
+            for turn, s in history:
+                print(f"    turn {turn}: → {s}")
+        print()
+
+    def _show_narrative(self) -> None:
+        bundle = self.mgr._sessions.get(self.session_id)
+        if not bundle:
+            print("  No session.")
+            return
+        # Get narrative from last turn's rationale_trace
+        if bundle.state.turns:
+            narrative = bundle.state.turns[-1].rationale_trace.get("narrative", "")
+            if narrative:
+                print()
+                print(cyan("  ── Narrative ──"))
+                # Word-wrap at ~70 chars
+                words = narrative.split()
+                line = "  "
+                for w in words:
+                    if len(line) + len(w) > 72:
+                        print(line)
+                        line = "  " + w
+                    else:
+                        line += " " + w if line.strip() else "  " + w
+                if line.strip():
+                    print(line)
+                print()
+            else:
+                print("  No narrative yet.")
+        else:
+            print("  No turns yet.")
+
+    def _show_projection(self) -> None:
+        bundle = self.mgr._sessions.get(self.session_id)
+        if not bundle or not bundle.state.turns:
+            print("  No data for projection.")
+            return
+        proj = bundle.state.turns[-1].rationale_trace.get("projection", {})
+        if not proj:
+            print("  No projection data.")
+            return
+        print()
+        print(cyan("  ── Trend Projection ──"))
+        print(f"  Horizon: {proj.get('horizon_turns', '?')} turns")
+        print(f"  Energy →    {proj.get('energy_projected', 0):.3f}")
+        print(f"  Continuity → {proj.get('continuity_projected', 0):.3f}")
+        print(f"  Stress →    {proj.get('stress_projected', 0):.3f}")
+        print(f"  Trust →     {proj.get('trust_projected', 0):.3f}")
+        desc = proj.get("trajectory_description", "")
+        if desc:
+            print(f"  Trajectory: {desc}")
         print()
 
 
