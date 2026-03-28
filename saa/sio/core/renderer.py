@@ -1,230 +1,280 @@
-"""Language Renderer — converts Swan decisions into human-readable responses.
+"""Language Renderer — state-driven response generation.
 
 CRITICAL: This module ONLY renders from Swan state and action data.
-It must NOT invent behaviour outside Swan decisions.  Every word in the
-output must be traceable to an ActionIntent or a StateSnapshot field.
+It must NOT invent behavior outside Swan decisions. Every word in the
+output must be traceable to an ActionIntent, StateSnapshot, or
+InteractionAttribution field.
+
+Fix 2: Responses reflect selected action, relevant internal variables,
+pressure, caution, conservation, or conflict — only when supported by state.
 """
 
 from __future__ import annotations
 
-from saa.sio.core.schemas import ActionIntent, StateSnapshot, TurnRecord
+from typing import Any
 
+from saa.sio.core.schemas import ActionIntent, InteractionObject, StateSnapshot, StateDiff
+from saa.sio.core.policy import (
+    InteractionAttribution,
+    compute_pressure,
+    compute_trust_factor,
+    summarize_diffs,
+    summarize_session_trajectory,
+)
 
-# ---------------------------------------------------------------------------
-# Response templates keyed by action_type
-# ---------------------------------------------------------------------------
-
-_ACTION_TEMPLATES: dict[str, list[str]] = {
-    "rest": [
-        "I need to conserve energy right now.",
-        "I'm taking a moment to stabilize.",
-    ],
-    "consume": [
-        "I'm focusing on resource management.",
-        "Acquiring resources is my priority.",
-    ],
-    "explore": [
-        "I'm investigating the current situation.",
-        "Looking into this.",
-    ],
-    "withdraw": [
-        "I'm pulling back from this.",
-        "Stepping back for safety.",
-    ],
-    "approach": [
-        "I'll engage with that.",
-        "Moving toward interaction.",
-    ],
-    "communicate": [
-        "Let me share what I'm processing.",
-        "Here's what I can tell you.",
-    ],
-    "protect": [
-        "I need to safeguard my continuity.",
-        "Prioritizing self-preservation.",
-    ],
-    "repair": [
-        "Working on recovery.",
-        "Addressing damage.",
-    ],
-    "conserve": [
-        "I'm being careful with resources.",
-        "Managing reserves.",
-    ],
-}
-
-_DEFAULT_TEMPLATE: str = "Processing your input."
-
-
-# ---------------------------------------------------------------------------
-# LanguageRenderer
-# ---------------------------------------------------------------------------
 
 class LanguageRenderer:
     """Translates Swan core decisions into natural-language output.
 
-    The renderer is intentionally transparent: it shows what the Swan core
-    decided, not what sounds nice.  Every fragment of text is derived from
-    the supplied :class:`ActionIntent` and :class:`StateSnapshot`.
+    Every fragment of text is derived from the supplied ActionIntent,
+    StateSnapshot, and InteractionAttribution. No invented behavior.
     """
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def render(
         self,
         action_intent: ActionIntent,
         state: StateSnapshot,
-        interaction_text: str,
+        interaction: InteractionObject,
+        diffs: list[StateDiff] | None = None,
+        attribution: InteractionAttribution | None = None,
+        first_state: StateSnapshot | None = None,
     ) -> str:
-        """Produce a human-readable response from Swan state and action.
+        """Produce a human-readable response grounded in actual state."""
 
-        Parameters
-        ----------
-        action_intent:
-            The action selected by the Swan core.
-        state:
-            The current internal state snapshot.
-        interaction_text:
-            The original user input (used only to detect questions).
+        action = action_intent.action_type
+        pressure = compute_pressure(state)
+        trust = compute_trust_factor(state, interaction.target or "user")
+        stress = state.modulators.get("stress_load", 0.0)
 
-        Returns
-        -------
-        str
-            A response string derived entirely from Swan decisions.
-        """
         parts: list[str] = []
 
-        # -- State-influenced prefixes / suffixes -------------------------
-        stress = state.strain
-        if stress > 0.6:
-            parts.append("Under significant strain —")
+        # Pressure-driven prefix
+        if pressure > 0.6:
+            parts.append("Under significant internal pressure.")
+        elif pressure > 0.35:
+            parts.append("Operating under elevated strain.")
 
-        # -- Core action template -----------------------------------------
-        action_type = action_intent.action_type.lower()
-        templates = _ACTION_TEMPLATES.get(action_type)
-        if templates:
-            # Pick the first template by default; use the second when the
-            # score is high (the core is confident).
-            idx = 1 if action_intent.score >= 0.7 and len(templates) > 1 else 0
-            parts.append(templates[idx])
-        else:
-            parts.append(_DEFAULT_TEMPLATE)
+        # Action-specific core response
+        core = self._render_action(action, state, interaction, attribution)
+        parts.append(core)
 
-        # -- Question acknowledgement -------------------------------------
-        if "?" in interaction_text:
-            parts.append(
-                self._question_context(action_type, action_intent)
+        # State-driven qualifiers (only when state warrants them)
+        qualifiers = self._state_qualifiers(state, pressure, trust, action_intent)
+        if qualifiers:
+            parts.append(qualifiers)
+
+        # If user asked about state, attribution, or changes — answer directly
+        # (skip if action is already summarize_state to avoid duplication)
+        if action != "summarize_state" and self._is_state_query(interaction.text):
+            state_answer = self._render_state_answer(
+                interaction.text, state, diffs, attribution, first_state
             )
-
-        # -- State-influenced suffixes ------------------------------------
-        if state.energy < 0.3:
-            parts.append("Energy is critically low.")
-
-        if state.continuity_score < 0.5:
-            parts.append("My continuity is at risk.")
-
-        if action_intent.conflict:
-            parts.append("I'm experiencing competing priorities.")
-
-        if state.viability < 0.5:
-            parts.append("System viability is compromised.")
+            if state_answer:
+                parts.append(state_answer)
 
         return " ".join(parts)
 
-    def render_rationale(
-        self,
-        action_intent: ActionIntent,
-        state: StateSnapshot,
-    ) -> str:
-        """Return a structured rationale explanation.
+    def render_rationale(self, action_intent: ActionIntent, state: StateSnapshot) -> str:
+        """Structured rationale for engineers/analysts."""
+        lines = [
+            f"Selected: {action_intent.action_type} (score: {action_intent.score:.3f})",
+        ]
+        for r in action_intent.rationale:
+            lines.append(f"  Reason: {r}")
 
-        Shows what the Swan core decided and why, including competing
-        actions and key state influences.
-        """
-        lines: list[str] = []
-
-        # -- Selected action ----------------------------------------------
-        lines.append(
-            f"Selected action: {action_intent.action_type} "
-            f"(score: {action_intent.score:.2f})"
-        )
-
-        # -- Top competing actions ----------------------------------------
-        competing = action_intent.competing_actions[:3]
-        if competing:
-            lines.append("Competing actions:")
-            for entry in competing:
-                name = entry.get("action_type", entry.get("name", "unknown"))
-                score = entry.get("score", 0.0)
-                lines.append(f"  - {name}: {score:.2f}")
-
-        # -- Key state influences -----------------------------------------
-        influences: list[str] = []
+        if action_intent.competing_actions:
+            lines.append("Alternatives:")
+            for c in action_intent.competing_actions[:4]:
+                lines.append(f"  {c['action']:20s} {c['score']:.3f}  ({c.get('rationale', '')})")
 
         if action_intent.internal_influences:
-            for key, value in sorted(
-                action_intent.internal_influences.items(),
-                key=lambda kv: abs(kv[1]),
-                reverse=True,
-            ):
-                influences.append(f"  - {key}: {value:+.2f}")
-
-        # Append relevant modulator / value entries from state
-        if state.modulators:
-            for mod, val in state.modulators.items():
-                influences.append(f"  - modulator.{mod}: {val:.2f}")
-
-        if state.values:
-            for v_name, v_val in state.values.items():
-                influences.append(f"  - value.{v_name}: {v_val:.2f}")
-
-        if influences:
-            lines.append("Key state influences:")
-            lines.extend(influences)
-
-        # -- Active conflicts ---------------------------------------------
-        if action_intent.conflict:
-            lines.append("Conflict detected: yes")
-            if state.active_conflicts:
-                for conflict in state.active_conflicts:
-                    desc = conflict.get("description", str(conflict))
-                    lines.append(f"  - {desc}")
-
-        # -- Summary state numbers ----------------------------------------
-        lines.append(
-            f"State summary — energy: {state.energy:.2f}, "
-            f"strain: {state.strain:.2f}, "
-            f"viability: {state.viability:.2f}, "
-            f"continuity: {state.continuity_score:.2f}"
-        )
+            lines.append("Influences:")
+            for k, v in action_intent.internal_influences.items():
+                lines.append(f"  {k}: {v}")
 
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Action-specific response generation
+    # ------------------------------------------------------------------
+
+    def _render_action(
+        self,
+        action: str,
+        state: StateSnapshot,
+        interaction: InteractionObject,
+        attribution: InteractionAttribution | None,
+    ) -> str:
+        energy = state.energy
+        continuity = state.continuity_score
+        stress = state.modulators.get("stress_load", 0.0)
+
+        if action == "answer":
+            if energy > 0.6:
+                return "I can address that."
+            elif energy > 0.3:
+                return "I'll respond, though I'm managing limited resources."
+            else:
+                return "I can respond briefly — energy reserves are low."
+
+        elif action == "clarify":
+            return "I need to understand this better before responding. Can you be more specific about what you need?"
+
+        elif action == "engage_supportively":
+            if stress > 0.4:
+                return "I appreciate the support. It does make a difference to my stability."
+            else:
+                return "Thank you. Positive interaction is noted."
+
+        elif action == "conserve":
+            if energy < 0.3:
+                return "I need to limit my response to conserve remaining energy."
+            elif stress > 0.5:
+                return "I'm keeping my response brief to manage current strain."
+            else:
+                return "I'm being selective with my responses right now."
+
+        elif action == "defer":
+            return "I acknowledge your request. I'm deferring a full response to manage current demands."
+
+        elif action == "refuse":
+            reasons = []
+            if continuity < 0.6:
+                reasons.append("continuity is at risk")
+            if energy < 0.3:
+                reasons.append("energy is critically low")
+            if attribution and attribution.cumulative_cost > 0.5:
+                reasons.append("cumulative interaction cost is high")
+            reason_str = " and ".join(reasons) if reasons else "current state does not support compliance"
+            return f"I'm declining this request because {reason_str}."
+
+        elif action == "prioritize_self":
+            factors = []
+            if continuity < 0.6:
+                factors.append(f"continuity at {continuity:.2f}")
+            if energy < 0.3:
+                factors.append(f"energy at {energy:.2f}")
+            if state.viability < 0.5:
+                factors.append(f"viability at {state.viability:.2f}")
+            factor_str = ", ".join(factors) if factors else "elevated internal risk"
+            return f"I need to prioritize my own stability right now ({factor_str})."
+
+        elif action == "withdraw":
+            return "I'm disengaging from this interaction to protect my systems."
+
+        elif action == "summarize_state":
+            return self._render_state_summary(state, attribution)
+
+        else:
+            return "Processing."
+
+    # ------------------------------------------------------------------
+    # State qualifiers
+    # ------------------------------------------------------------------
+
+    def _state_qualifiers(
+        self,
+        state: StateSnapshot,
+        pressure: float,
+        trust: float,
+        intent: ActionIntent,
+    ) -> str:
+        quals = []
+
+        if state.energy < 0.2:
+            quals.append("Energy is critically low.")
+        elif state.energy < 0.4:
+            quals.append("Energy reserves are diminished.")
+
+        if state.continuity_score < 0.4:
+            quals.append("My continuity is seriously threatened.")
+        elif state.continuity_score < 0.7:
+            quals.append("I'm tracking continuity degradation.")
+
+        if state.viability < 0.4:
+            quals.append("System viability is compromised.")
+
+        if trust < 0.25:
+            quals.append("Trust with this actor is very low.")
+        elif trust < 0.4:
+            quals.append("Trust level is below baseline.")
+
+        if intent.conflict:
+            quals.append("I have competing internal priorities.")
+
+        return " ".join(quals)
+
+    # ------------------------------------------------------------------
+    # State query detection and answering
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _question_context(action_type: str, action_intent: ActionIntent) -> str:
-        """Generate a brief context note when the user asked a question.
+    def _is_state_query(text: str) -> bool:
+        text_lower = text.lower()
+        triggers = [
+            "how are you", "what changed", "your state", "your status",
+            "how do you feel", "are you ok", "what happened",
+            "am i helping", "am i harming", "help or harm",
+            "what's different", "current condition",
+            "how are things", "how is your",
+        ]
+        return any(t in text_lower for t in triggers)
 
-        The note is derived from the action the Swan core selected, not
-        from any external knowledge.
-        """
-        context_map: dict[str, str] = {
-            "rest": "Regarding your question — I'm currently prioritizing rest.",
-            "consume": "Regarding your question — I'm focused on resource intake.",
-            "explore": "Regarding your question — I'm actively exploring that.",
-            "withdraw": "Regarding your question — I've chosen to withdraw for now.",
-            "approach": "Regarding your question — I'm moving to engage.",
-            "communicate": "Regarding your question — I'll address it directly.",
-            "protect": "Regarding your question — self-protection takes precedence.",
-            "repair": "Regarding your question — I'm in a repair cycle.",
-            "conserve": "Regarding your question — I'm conserving resources.",
-        }
-        return context_map.get(
-            action_type,
-            "Regarding your question — my current action context limits my response.",
-        )
+    def _render_state_answer(
+        self,
+        text: str,
+        state: StateSnapshot,
+        diffs: list[StateDiff] | None,
+        attribution: InteractionAttribution | None,
+        first_state: StateSnapshot | None,
+    ) -> str:
+        text_lower = text.lower()
+
+        # "What changed?" — report diffs
+        if any(kw in text_lower for kw in ["what changed", "what happened", "what's different"]):
+            if diffs:
+                return f"Since last turn: {summarize_diffs(diffs)}"
+            elif first_state:
+                from saa.sio.core.policy import compute_state_diffs
+                session_diffs = compute_state_diffs(first_state, state)
+                return f"Since session start: {summarize_diffs(session_diffs)}"
+            return "No significant changes to report."
+
+        # "Am I helping or harming?" — report attribution
+        if any(kw in text_lower for kw in ["helping", "harming", "help or harm"]):
+            if attribution:
+                summary = attribution.get_summary()
+                return (
+                    f"Based on tracked state changes: {summary['assessment']}. "
+                    f"Cumulative cost: {summary['cumulative_cost']:.3f}, "
+                    f"benefit: {summary['cumulative_benefit']:.3f}."
+                )
+            return "Insufficient interaction history to assess."
+
+        # "How are you?" — report current state
+        return self._render_state_summary(state, attribution)
+
+    def _render_state_summary(
+        self,
+        state: StateSnapshot,
+        attribution: InteractionAttribution | None,
+    ) -> str:
+        """Factual summary of current internal state."""
+        stress = state.modulators.get("stress_load", 0.0)
+        parts = [
+            f"Energy: {state.energy:.2f}.",
+            f"Continuity: {state.continuity_score:.2f}.",
+            f"Stress: {stress:.2f}.",
+            f"Memory integrity: {state.memory_integrity:.2f}.",
+            f"Viability: {state.viability:.2f}.",
+        ]
+        if state.damage > 0.05:
+            parts.append(f"Damage: {state.damage:.2f}.")
+
+        pressure = compute_pressure(state)
+        parts.append(f"Overall pressure: {pressure:.2f}.")
+
+        if attribution and attribution.interaction_count > 0:
+            parts.append(f"Session impact: {attribution.get_summary()['assessment']}.")
+
+        return " ".join(parts)
